@@ -74,7 +74,7 @@
     <div class="txt"><div class="co" id="hud-co"></div><div class="sub" id="hud-sub"></div></div>
     <div class="right txt"><div id="hud-score"></div><div class="mode" id="hud-mode"></div></div>
   </div>
-  <div id="btns"><button class="btn on" id="b-auto">AUTOPLAY</button><button class="btn" id="b-restart">RESTART</button></div>
+  <div id="btns"><button class="btn on" id="b-auto">AUTOPLAY</button><button class="btn" id="b-sound">SOUND OFF</button><button class="btn" id="b-restart">RESTART</button></div>
   <div class="layer"><div id="card"><div class="k"></div><div class="b"></div></div></div>
   <div class="layer"><div class="center txt" id="title"><div class="w"></div><div class="c"></div><div class="r"></div></div></div>
   <div id="timeline">
@@ -329,6 +329,7 @@ function startWorld(i) {
   ui.title.classList.add('show');
   ui.hudCo.textContent = (w.bonus ? 'BONUS · ' : `WORLD ${i + 1} · `) + w.company.toUpperCase();
   ui.hudSub.textContent = `${w.role} · ${w.years}`;
+  musicStart(w.theme);
 }
 
 function restart() { game.coins = 0; game.bugs = 0; ui.big.classList.remove('show'); startWorld(0); }
@@ -368,7 +369,8 @@ function headBump(level, c, r) {
     const m = level.milestones.find(m => m.col === c && m.row === r);
     if (m) { m.hit = true; game.player.checkpoint = m.cx - 6; showCard(m); if (game.auto) game.player.readT = READ_FRAMES; }
     burst(level, c * TILE + 8, r * TILE, '#ffd75e', 10);
-  } else if (t === T.BRICK) { level.bumps.push({ c, r, t: 0 }); }
+    play('milestone');
+  } else if (t === T.BRICK) { level.bumps.push({ c, r, t: 0 }); play('bump'); }
 }
 function burst(level, x, y, color, n) { for (let i = 0; i < n; i++) level.particles.push({ x, y, vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3 - 1, t: 30 + Math.random() * 20, color }); }
 
@@ -425,6 +427,139 @@ function decide(p, L) {
   return inp;
 }
 
+// ---------------------------------------------------------------- audio (Web Audio chiptune, no assets)
+const SCALES = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10], dorian: [0, 2, 3, 5, 7, 9, 10], lydian: [0, 2, 4, 6, 7, 9, 11], mixo: [0, 2, 4, 5, 7, 9, 10] };
+// Arpeggio shapes over the current chord: 0 root, 1 third, 2 fifth, 3 octave, null rest (one bar of 16ths)
+const ARPS = [
+  [0, null, 1, null, 2, null, 1, null, 0, null, 1, null, 2, null, 3, null],
+  [0, 0, null, 2, null, 1, null, 2, 3, null, 2, null, 1, null, 0, null],
+  [2, null, 1, null, 0, null, null, null, 1, null, 2, null, 3, null, 2, null],
+  [3, null, null, 2, null, null, 1, null, 0, null, 1, null, 2, null, null, null],
+];
+const SONGS = {
+  dotcom:     { bpm: 116, scale: 'minor',  root: 45, prog: [1, 6, 3, 7], lead: 'sawtooth', arps: [0, 1, 0, 3], drive: true },
+  hills:      { bpm: 144, scale: 'major',  root: 48, prog: [1, 6, 4, 5], lead: 'square',   arps: [0, 0, 1, 2] },
+  corporate:  { bpm: 128, scale: 'mixo',   root: 46, prog: [1, 4, 6, 5], lead: 'triangle', arps: [1, 0, 1, 3] },
+  sunset:     { bpm: 108, scale: 'major',  root: 50, prog: [1, 3, 4, 5], lead: 'square',   arps: [2, 0, 2, 1] },
+  nightcity:  { bpm: 100, scale: 'dorian', root: 43, prog: [1, 4, 6, 7], lead: 'triangle', arps: [3, 1, 3, 0] },
+  clouds:     { bpm: 134, scale: 'major',  root: 52, prog: [1, 5, 6, 4], lead: 'square',   arps: [0, 2, 0, 1] },
+  whiteboard: { bpm: 138, scale: 'lydian', root: 48, prog: [1, 2, 1, 5], lead: 'triangle', arps: [1, 1, 2, 0] },
+  ai:         { bpm: 124, scale: 'dorian', root: 45, prog: [1, 7, 4, 6], lead: 'sawtooth', arps: [0, 3, 1, 2], drive: true },
+  castle:     { bpm: 150, scale: 'minor',  root: 41, prog: [1, 1, 6, 7], lead: 'square',   arps: [3, 3, 0, 1], drive: true },
+};
+const MUSIC_LEVEL = 0.35, DUCK_LEVEL = 0.16;
+const audio = { ctx: null, master: null, music: null, sfx: null, noiseBuf: null, enabled: true, unlocked: false, song: null, step: 0, nextTime: 0, timer: null, ducked: false };
+try { audio.enabled = localStorage.getItem('cv-arcade-sound') !== 'off'; } catch (e) { /* storage unavailable */ }
+
+function audioInit(ctx) {
+  if (audio.ctx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  audio.ctx = ctx || (AC && new AC());
+  if (!audio.ctx) return;
+  const c = audio.ctx;
+  audio.master = c.createGain(); audio.master.gain.value = 0.85; audio.master.connect(c.destination);
+  audio.music = c.createGain(); audio.music.gain.value = 0; audio.music.connect(audio.master);
+  audio.sfx = c.createGain(); audio.sfx.gain.value = 0.6; audio.sfx.connect(audio.master);
+  audio.noiseBuf = c.createBuffer(1, c.sampleRate, c.sampleRate);
+  const d = audio.noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+const live = () => !!audio.ctx && audio.unlocked && audio.enabled;
+const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
+function tone(o) {
+  const c = audio.ctx, t = o.t ?? c.currentTime, dur = o.dur ?? 0.1;
+  const osc = c.createOscillator(), g = c.createGain();
+  osc.type = o.type || 'square';
+  osc.frequency.setValueAtTime(o.freq, t);
+  if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(o.vol ?? 0.2, t + (o.attack ?? 0.005));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g).connect(o.dest || audio.sfx);
+  osc.start(t); osc.stop(t + dur + 0.05);
+}
+function noise(o) {
+  const c = audio.ctx, t = o.t ?? c.currentTime, dur = o.dur ?? 0.08;
+  const src = c.createBufferSource(); src.buffer = audio.noiseBuf;
+  const f = c.createBiquadFilter(); f.type = o.lp ? 'lowpass' : 'highpass'; f.frequency.value = o.cut ?? 3000;
+  const g = c.createGain();
+  g.gain.setValueAtTime(o.vol ?? 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f).connect(g).connect(o.dest || audio.sfx);
+  src.start(t); src.stop(t + dur + 0.02);
+}
+function seq(freqs, gap, o) { const t0 = audio.ctx.currentTime; freqs.forEach((freq, i) => tone({ ...o, freq, t: t0 + i * gap })); }
+const SFX = {
+  jump() { tone({ freq: 220, to: 660, dur: 0.14, vol: 0.18 }); },
+  coin() { const t = audio.ctx.currentTime; tone({ freq: 988, t, dur: 0.07, vol: 0.15 }); tone({ freq: 1319, t: t + 0.07, dur: 0.3, vol: 0.15 }); },
+  stomp() { noise({ dur: 0.07, vol: 0.2, lp: true, cut: 1200 }); tone({ freq: 240, to: 60, dur: 0.14, type: 'triangle', vol: 0.3 }); },
+  bump() { tone({ freq: 130, to: 80, dur: 0.09, vol: 0.2 }); },
+  milestone() { seq([523, 659, 784, 1047, 1319], 0.06, { dur: 0.12, vol: 0.14 }); tone({ freq: 1568, t: audio.ctx.currentTime + 0.3, dur: 0.5, vol: 0.14, type: 'triangle' }); },
+  hurt() { tone({ freq: 420, to: 70, dur: 0.32, type: 'sawtooth', vol: 0.16 }); },
+  fall() { tone({ freq: 700, to: 90, dur: 0.6, vol: 0.14 }); },
+  flag() { seq([392, 523, 659, 784, 1047, 1319, 1568], 0.09, { dur: 0.16, vol: 0.14 }); tone({ freq: 2093, t: audio.ctx.currentTime + 0.63, dur: 0.7, vol: 0.14, type: 'triangle' }); },
+  end() { seq([523, 523, 523, 659, 784, 1047, 784, 1047], 0.14, { dur: 0.22, vol: 0.14 }); tone({ freq: 1319, t: audio.ctx.currentTime + 1.12, dur: 1.2, vol: 0.14, type: 'triangle' }); },
+};
+function play(name) { if (live()) SFX[name](); }
+
+function applyMusicGain() {
+  if (!audio.ctx) return;
+  const level = audio.song ? (audio.ducked ? DUCK_LEVEL : MUSIC_LEVEL) : 0;
+  audio.music.gain.setTargetAtTime(level, audio.ctx.currentTime, 0.04);
+}
+function duck(on) { audio.ducked = on; applyMusicGain(); }
+function musicStart(theme) {
+  musicStop();
+  if (!live() || !SONGS[theme]) return;
+  audio.song = SONGS[theme]; audio.step = 0; audio.nextTime = audio.ctx.currentTime + 0.05;
+  applyMusicGain();
+  audio.timer = setInterval(musicTick, 40);
+  musicTick();
+}
+function musicStop() {
+  if (audio.timer) clearInterval(audio.timer);
+  audio.timer = null; audio.song = null;
+  applyMusicGain();
+}
+function musicTick() {
+  const s = audio.song;
+  if (!s) return;
+  const spb = 60 / s.bpm / 4;
+  while (audio.nextTime < audio.ctx.currentTime + 0.2) {
+    scheduleStep(s, audio.step, audio.nextTime, spb);
+    audio.step = (audio.step + 1) % 64;
+    audio.nextTime += spb;
+  }
+}
+function scheduleStep(s, step, t, spb) {
+  const bar = Math.floor(step / 16), i = step % 16, scale = SCALES[s.scale], chord = s.prog[bar], M = audio.music;
+  const midi = (deg, base) => base + scale[((deg - 1) % 7 + 7) % 7] + 12 * Math.floor((deg - 1) / 7);
+  if (i % 2 === 0) tone({ freq: mtof(midi(chord, s.root) + (i % 8 === 6 ? 12 : 0)), type: 'triangle', t, dur: spb * 1.7, vol: 0.5, dest: M });
+  const ti = ARPS[s.arps[bar]][i];
+  if (ti !== null) tone({ freq: mtof(midi(chord + [0, 2, 4, 7][ti], s.root + 24)), type: s.lead, t, dur: spb * 0.95, vol: s.lead === 'sawtooth' ? 0.16 : 0.24, dest: M });
+  if (i === 0) for (const k of [0, 2, 4]) tone({ freq: mtof(midi(chord + k, s.root + 12)), type: 'triangle', t, dur: spb * 15.5, vol: 0.12, attack: 0.08, dest: M });
+  if (s.drive ? i % 4 === 0 : (i === 0 || i === 8)) tone({ freq: 150, to: 45, dur: 0.14, type: 'sine', t, vol: 0.9, dest: M });
+  if (i === 4 || i === 12) noise({ t, dur: 0.12, vol: 0.35, cut: 1800, dest: M });
+  if (s.drive || i % 2 === 0) noise({ t, dur: 0.03, vol: i % 4 === 0 ? 0.16 : 0.08, cut: 6000, dest: M });
+}
+function musicForState() { if (audio.enabled && audio.unlocked && game.level && (game.state === 'title' || game.state === 'play')) musicStart(game.level.world.theme); }
+function audioUnlock() {
+  audioInit();
+  if (!audio.ctx || audio.unlocked) return;
+  audio.ctx.resume().then(() => { audio.unlocked = true; updateSoundUi(); musicForState(); });
+}
+function setSound(on) {
+  audio.enabled = on;
+  try { localStorage.setItem('cv-arcade-sound', on ? 'on' : 'off'); } catch (e) { /* storage unavailable */ }
+  if (on) musicForState(); else musicStop();
+  updateSoundUi();
+}
+function updateSoundUi() {
+  const on = audio.unlocked && audio.enabled;
+  ui.bSound.textContent = on ? 'SOUND ON' : 'SOUND OFF';
+  ui.bSound.classList.toggle('on', on);
+}
+
 // ---------------------------------------------------------------- update
 function updatePlay() {
   const L = game.level, p = game.player;
@@ -438,7 +573,7 @@ function updatePlay() {
     if (p.vx !== 0) p.dir = Math.sign(p.vx);
     const jumpPressed = inp.jump && !p.jumpHeld;
     p.jumpHeld = inp.jump;
-    if (jumpPressed && p.onGround && p.kb === 0) { p.vy = JUMP_V; p.onGround = false; }
+    if (jumpPressed && p.onGround && p.kb === 0) { p.vy = JUMP_V; p.onGround = false; play('jump'); }
     if (!inp.jump && p.vy < -2.5) p.vy = -2.5;
     p.isPlayer = true;
     moveBody(p, L);
@@ -448,7 +583,7 @@ function updatePlay() {
     if (p.y > ROWS * TILE + 40) respawn(p);
 
     const poleX = L.poleCol * TILE + 7;
-    if (p.x + p.w > poleX && p.x < poleX + 2) { p.phase = 'flag'; p.x = poleX - p.w + 1; p.vx = 0; p.vy = 0; hideCard(); }
+    if (p.x + p.w > poleX && p.x < poleX + 2) { p.phase = 'flag'; p.x = poleX - p.w + 1; p.vx = 0; p.vy = 0; hideCard(); musicStop(); play('flag'); }
   } else if (p.phase === 'flag') {
     p.y = Math.min(p.y + 2, GROUND_ROW * TILE - p.h);
     L.flagY = Math.min(L.flagY + 2, (GROUND_ROW - 2) * TILE);
@@ -467,11 +602,11 @@ function updatePlay() {
     if (e.onGround && !solidAt(L, Math.floor(frontX / TILE), Math.floor((e.y + e.h + 1) / TILE))) e.vx = -e.vx;
     if (e.y > ROWS * TILE + 40) e.dead = true;
     if (p.phase === 'play' && overlap(p, e)) {
-      if (p.vy > 0 && p.y + p.h - e.y < 9) { e.dead = true; p.vy = -4; game.bugs++; burst(L, e.x + 8, e.y + 6, '#d23c30', 6); }
-      else if (p.invuln === 0) { p.invuln = 90; p.kb = 14; p.kbDir = p.x + p.w / 2 < e.x + e.w / 2 ? -1 : 1; p.vy = -3; }
+      if (p.vy > 0 && p.y + p.h - e.y < 9) { e.dead = true; p.vy = -4; game.bugs++; burst(L, e.x + 8, e.y + 6, '#d23c30', 6); play('stomp'); }
+      else if (p.invuln === 0) { p.invuln = 90; p.kb = 14; p.kbDir = p.x + p.w / 2 < e.x + e.w / 2 ? -1 : 1; p.vy = -3; play('hurt'); }
     }
   }
-  for (const c of L.coins) if (!c.taken && p.phase === 'play' && p.x < c.x + 8 && p.x + p.w > c.x && p.y < c.y + 8 && p.y + p.h > c.y) { c.taken = true; game.coins++; burst(L, c.x + 4, c.y + 4, '#f5c542', 4); }
+  for (const c of L.coins) if (!c.taken && p.phase === 'play' && p.x < c.x + 8 && p.x + p.w > c.x && p.y < c.y + 8 && p.y + p.h > c.y) { c.taken = true; game.coins++; burst(L, c.x + 4, c.y + 4, '#f5c542', 4); play('coin'); }
   for (const b of L.bumps) b.t++;
   L.bumps = L.bumps.filter(b => b.t < 16);
   for (const q of L.particles) { q.x += q.vx; q.y += q.vy; q.vy += 0.2; q.t--; }
@@ -479,7 +614,7 @@ function updatePlay() {
   if (game.cardT > 0 && --game.cardT === 0) hideCard();
 }
 function overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
-function respawn(p) { p.x = p.checkpoint; p.y = GROUND_ROW * TILE - p.h - 8; p.vx = 0; p.vy = 0; p.invuln = 60; p.kb = 0; game.fade = 1; game.fadeDir = -1; }
+function respawn(p) { p.x = p.checkpoint; p.y = GROUND_ROW * TILE - p.h - 8; p.vx = 0; p.vy = 0; p.invuln = 60; p.kb = 0; game.fade = 1; game.fadeDir = -1; play('fall'); }
 
 function update() {
   game.frame++; game.stateT++;
@@ -508,17 +643,17 @@ const ui = {
   card: document.getElementById('card'), title: document.getElementById('title'), big: document.getElementById('big'),
   hudCo: document.getElementById('hud-co'), hudSub: document.getElementById('hud-sub'), hudScore: document.getElementById('hud-score'), hudMode: document.getElementById('hud-mode'),
   tlMarker: document.getElementById('tl-marker'), tlBar: document.getElementById('tl-bar'), tlNow: document.getElementById('tl-now'),
-  bAuto: document.getElementById('b-auto'),
+  bAuto: document.getElementById('b-auto'), bSound: document.getElementById('b-sound'),
 };
 function showCard(m) {
   const w = game.level.world;
   ui.card.querySelector('.k').textContent = `${w.company.toUpperCase()} · ${w.years} · ${m.i + 1}/${w.milestones.length}`;
   ui.card.querySelector('.b').textContent = m.text;
-  ui.card.classList.add('show');
+  ui.card.classList.add('show'); duck(true);
   // Keep the card up while the player runs to the next block; it sits in the sky and never covers play
   game.cardT = game.auto ? READ_FRAMES + 420 : 480;
 }
-function hideCard() { ui.card.classList.remove('show'); game.cardT = 0; }
+function hideCard() { ui.card.classList.remove('show'); game.cardT = 0; duck(false); }
 function showClear() {
   const w = game.level.world;
   ui.title.querySelector('.w').textContent = w.bonus ? 'BONUS COMPLETE' : 'STAGE CLEAR';
@@ -529,13 +664,13 @@ function showClear() {
 function showIntro() {
   ui.big.innerHTML = `<div class="n">${CV.name}</div><div class="t">${CV.tagline}</div>
     <div class="p">A CAREER PLAYTHROUGH · 1999 – TODAY</div>
-    <div class="p" style="margin-top:8rem;color:#9ff0c9">ARROWS / WASD MOVE · SPACE JUMP<br>ENTER TOGGLES AUTOPLAY · R RESTARTS</div>
+    <div class="p" style="margin-top:8rem;color:#9ff0c9">ARROWS / WASD MOVE · SPACE JUMP<br>ENTER TOGGLES AUTOPLAY · R RESTARTS · M SOUND</div>
     <div class="blink">PRESS ANY KEY OR WAIT</div>`;
   ui.big.classList.add('show');
 }
 function showEnd() {
   game.state = 'end'; game.stateT = 0; game.fade = 0; game.fadeDir = 0;
-  hideCard();
+  hideCard(); musicStop(); play('end');
   ui.big.innerHTML = `<div class="n">THE END</div><div class="t">${CV.name} · ${CV.tagline}</div>
     <div class="p">COINS ${game.coins} · BUGS FIXED ${game.bugs}</div>
     <div class="p" style="margin-top:10rem"><a href="mailto:${CV.email}">${CV.email}</a><br><a href="${CV.linkedin}" target="_blank" rel="noopener">linkedin.com/in/rbilleci</a> · <a href="${CV.github}" target="_blank" rel="noopener">github.com/rbilleci</a></div>
@@ -728,6 +863,8 @@ let anyKeyPressed = false;
 const MOVE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'KeyA', 'KeyD', 'KeyW', 'Space', 'KeyZ', 'KeyX']);
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
+  audioUnlock();
+  if (e.code === 'KeyM') { setSound(audio.unlocked ? !audio.enabled : true); return; }
   if (e.code === 'Enter') { setAuto(!game.auto); anyKeyPressed = true; e.preventDefault(); return; }
   if (e.code === 'KeyR') { restart(); return; }
   if (MOVE_KEYS.has(e.code)) { keys[e.code] = true; if (game.auto && game.state === 'play') setAuto(false); e.preventDefault(); }
@@ -736,6 +873,9 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 function setAuto(on) { game.auto = on; if (on && game.player) game.player.readT = 0; if (!on) hideCard(); }
 ui.bAuto.addEventListener('click', () => setAuto(!game.auto));
+ui.bSound.addEventListener('click', () => setSound(audio.unlocked ? !audio.enabled : true));
+window.addEventListener('pointerdown', audioUnlock);
+document.addEventListener('visibilitychange', () => { if (document.hidden) musicStop(); else musicForState(); });
 document.getElementById('b-restart').addEventListener('click', restart);
 const touch = { left: false, right: false, jump: false };
 for (const [id, k] of [['t-left', 'left'], ['t-right', 'right'], ['t-jump', 'jump']]) {
@@ -756,6 +896,7 @@ function layout() {
 window.addEventListener('resize', layout);
 layout();
 buildTimeline();
+updateSoundUi();
 showIntro();
 
 let last = performance.now(), acc = 0;
