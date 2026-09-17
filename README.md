@@ -14,7 +14,7 @@ An 8-bit side-scrolling platformer that plays through my CV, one world per role,
 | `R` | Restart |
 | `M` | Toggle sound |
 
-Touch controls appear on phones and tablets. Browsers block audio until the first key press or tap, so the demo runs silently until you interact; the SOUND button shows the current state and your choice is remembered.
+Touch controls appear on phones and tablets. Sound is on by default, but browsers block audio until the first key press or tap, so the demo runs silently until you interact; the SOUND button and `M` turn it off, and your choice is remembered.
 
 ## How it works
 

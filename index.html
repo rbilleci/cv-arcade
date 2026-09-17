@@ -47,7 +47,9 @@
   #title .w { font-size: 6rem; color: #ffd75e; margin-bottom: 8rem; letter-spacing: 1rem; }
   #title .c { font-size: 12rem; margin-bottom: 8rem; }
   #title .r { font-size: 5rem; color: #dfe6f3; line-height: 1.8; white-space: pre-line; }
-  #big { background: rgba(4, 4, 10, .78); pointer-events: auto; }
+  #big { background: rgba(4, 4, 10, .78); pointer-events: none; }
+  #big.show { pointer-events: auto; }
+  #big .blink { cursor: pointer; }
   #big .n { font-size: 14rem; margin-bottom: 8rem; }
   #big .t { font-size: 5rem; color: #ffd75e; line-height: 1.8; margin-bottom: 12rem; max-width: 320rem; }
   #big .p { font-size: 5rem; color: #dfe6f3; line-height: 1.9; }
@@ -74,7 +76,6 @@
     <div class="txt"><div class="co" id="hud-co"></div><div class="sub" id="hud-sub"></div></div>
     <div class="right txt"><div id="hud-score"></div><div class="mode" id="hud-mode"></div></div>
   </div>
-  <div id="btns"><button class="btn on" id="b-auto">AUTOPLAY</button><button class="btn" id="b-sound">SOUND OFF</button><button class="btn" id="b-restart">RESTART</button></div>
   <div class="layer"><div id="card"><div class="k"></div><div class="b"></div></div></div>
   <div class="layer"><div class="center txt" id="title"><div class="w"></div><div class="c"></div><div class="r"></div></div></div>
   <div id="timeline">
@@ -83,6 +84,7 @@
   </div>
   <div id="touch"><div><button id="t-left">&lt;</button><button id="t-right">&gt;</button></div><div><button id="t-jump">A</button></div></div>
   <div class="layer"><div class="center txt" id="big"></div></div>
+  <div id="btns"><button class="btn on" id="b-auto">AUTOPLAY</button><button class="btn" id="b-sound">SOUND ON</button><button class="btn" id="b-restart">RESTART</button></div>
 </div>
 
 <script>
@@ -463,6 +465,7 @@ function audioInit(ctx) {
   audio.noiseBuf = c.createBuffer(1, c.sampleRate, c.sampleRate);
   const d = audio.noiseBuf.getChannelData(0);
   for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  c.addEventListener('statechange', onAudioRunning);
 }
 const live = () => !!audio.ctx && audio.unlocked && audio.enabled;
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
@@ -543,10 +546,16 @@ function scheduleStep(s, step, t, spb) {
   if (s.drive || i % 2 === 0) noise({ t, dur: 0.03, vol: i % 4 === 0 ? 0.16 : 0.08, cut: 6000, dest: M });
 }
 function musicForState() { if (audio.enabled && audio.unlocked && game.level && (game.state === 'title' || game.state === 'play')) musicStart(game.level.world.theme); }
+// Browsers keep the context suspended until a user gesture; resume() is attempted at load and on every gesture
 function audioUnlock() {
   audioInit();
   if (!audio.ctx || audio.unlocked) return;
-  audio.ctx.resume().then(() => { audio.unlocked = true; updateSoundUi(); musicForState(); });
+  audio.ctx.resume().then(onAudioRunning, () => {});
+}
+function onAudioRunning() {
+  if (audio.unlocked || !audio.ctx || audio.ctx.state !== 'running') return;
+  audio.unlocked = true;
+  updateSoundUi(); musicForState();
 }
 function setSound(on) {
   audio.enabled = on;
@@ -555,9 +564,8 @@ function setSound(on) {
   updateSoundUi();
 }
 function updateSoundUi() {
-  const on = audio.unlocked && audio.enabled;
-  ui.bSound.textContent = on ? 'SOUND ON' : 'SOUND OFF';
-  ui.bSound.classList.toggle('on', on);
+  ui.bSound.textContent = audio.enabled ? 'SOUND ON' : 'SOUND OFF';
+  ui.bSound.classList.toggle('on', audio.enabled);
 }
 
 // ---------------------------------------------------------------- update
@@ -665,7 +673,7 @@ function showIntro() {
   ui.big.innerHTML = `<div class="n">${CV.name}</div><div class="t">${CV.tagline}</div>
     <div class="p">A CAREER PLAYTHROUGH · 1999 – TODAY</div>
     <div class="p" style="margin-top:8rem;color:#9ff0c9">ARROWS / WASD MOVE · SPACE JUMP<br>ENTER TOGGLES AUTOPLAY · R RESTARTS · M SOUND</div>
-    <div class="blink">PRESS ANY KEY OR WAIT</div>`;
+    <div class="blink">PRESS ANY KEY, TAP, OR WAIT</div>`;
   ui.big.classList.add('show');
 }
 function showEnd() {
@@ -674,8 +682,9 @@ function showEnd() {
   ui.big.innerHTML = `<div class="n">THE END</div><div class="t">${CV.name} · ${CV.tagline}</div>
     <div class="p">COINS ${game.coins} · BUGS FIXED ${game.bugs}</div>
     <div class="p" style="margin-top:10rem"><a href="mailto:${CV.email}">${CV.email}</a><br><a href="${CV.linkedin}" target="_blank" rel="noopener">linkedin.com/in/rbilleci</a> · <a href="${CV.github}" target="_blank" rel="noopener">github.com/rbilleci</a></div>
-    <div class="blink">PRESS R TO PLAY AGAIN</div>`;
+    <div class="blink" id="again">PRESS R OR TAP HERE TO PLAY AGAIN</div>`;
   ui.big.classList.add('show');
+  document.getElementById('again').addEventListener('click', restart);
 }
 function buildTimeline() {
   const t0 = WORLDS[0].start, t1 = WORLDS[WORLDS.length - 2].end;
@@ -687,7 +696,7 @@ function buildTimeline() {
 }
 function updateHud() {
   ui.hudScore.textContent = `COINS ${String(game.coins).padStart(2, '0')}  BUGS FIXED ${String(game.bugs).padStart(2, '0')}`;
-  ui.hudMode.textContent = game.auto ? 'AUTOPLAY · PRESS ARROWS TO PLAY' : 'MANUAL · ENTER FOR AUTOPLAY';
+  ui.hudMode.textContent = (game.auto ? 'AUTOPLAY · PRESS ARROWS TO PLAY' : 'MANUAL · ENTER FOR AUTOPLAY') + (audio.enabled && !audio.unlocked ? ' · TAP OR KEY FOR SOUND' : '');
   ui.hudMode.classList.toggle('manual', !game.auto);
   ui.bAuto.classList.toggle('on', game.auto);
   if (!game.level) return;
@@ -873,8 +882,13 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 function setAuto(on) { game.auto = on; if (on && game.player) game.player.readT = 0; if (!on) hideCard(); }
 ui.bAuto.addEventListener('click', () => setAuto(!game.auto));
-ui.bSound.addEventListener('click', () => setSound(audio.unlocked ? !audio.enabled : true));
-window.addEventListener('pointerdown', audioUnlock);
+// The press that unlocks audio should start it, not toggle it straight back off
+ui.bSound.addEventListener('pointerdown', () => { audio.unlockPress = !audio.unlocked; });
+ui.bSound.addEventListener('click', () => {
+  if (audio.unlockPress) { audio.unlockPress = false; setSound(true); return; }
+  setSound(!audio.enabled);
+});
+window.addEventListener('pointerdown', () => { audioUnlock(); if (game.state === 'intro') anyKeyPressed = true; });
 document.addEventListener('visibilitychange', () => { if (document.hidden) musicStop(); else musicForState(); });
 document.getElementById('b-restart').addEventListener('click', restart);
 const touch = { left: false, right: false, jump: false };
@@ -897,6 +911,7 @@ window.addEventListener('resize', layout);
 layout();
 buildTimeline();
 updateSoundUi();
+audioUnlock();
 showIntro();
 
 let last = performance.now(), acc = 0;
